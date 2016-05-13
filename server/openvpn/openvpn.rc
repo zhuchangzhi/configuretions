@@ -1,0 +1,157 @@
+#!/bin/sh
+# chkconfig: - 24 76
+openvpn=""
+openvpn_locations="/opt/local/openvpn/sbin/openvpn"
+for location in $openvpn_locations
+do
+  if [ -f "$location" ]
+  then
+    openvpn=$location
+  fi
+done
+lock="/var/lock/subsys/openvpn"
+piddir="/var/run/openvpn"
+work=/opt/local/openvpn/etc
+. /etc/rc.d/init.d/functions
+. /etc/sysconfig/network
+if [ ${NETWORKING} = "no" ]
+then
+  echo "Networking is down"
+  exit 0
+fi
+if ! [ -f  $openvpn ] 
+then
+  echo "openvpn binary not found"
+  exit 0
+fi
+case "$1" in
+  start)
+        echo -n $"Starting openvpn: "
+        /sbin/modprobe tun >/dev/null 2>&1
+        # From a security perspective, I think it makes
+        # sense to remove this, and have users who need
+        # it explictly enable in their --up scripts or
+        # firewall setups.
+        echo 1 > /proc/sys/net/ipv4/ip_forward
+        # Run startup script, if defined
+        if [ -f $work/openvpn-startup ]; then
+            $work/openvpn-startup
+        fi
+        if [ ! -d  $piddir ]; then
+            mkdir $piddir
+        fi
+        if [ -f $lock ]; then
+            # we were not shut down correctly
+            for pidf in `/bin/ls $piddir/*.pid 2>/dev/null`; do
+              if [ -s $pidf ]; then
+                kill `cat $pidf` >/dev/null 2>&1
+              fi
+              rm -f $pidf
+            done
+            rm -f $lock
+            sleep 2
+        fi
+        rm -f $piddir/*.pid
+        cd $work
+        # Start every .conf in $work and run .sh if exists
+        errors=0
+        successes=0
+        for c in `/bin/ls *.conf 2>/dev/null`; do
+            bn=${c%%.conf}
+            if [ -f "$bn.sh" ]; then
+                . ./$bn.sh
+            fi
+            rm -f $piddir/$bn.pid
+            # Handle backward compatibility, see Red Hat Bugzilla ID #458594
+            script_security=''
+            if [ -z "$( grep '^[[:space:]]*script-security[[:space:]]' $c )" ]; then
+                script_security="--script-security 2"
+            fi
+            $openvpn --daemon --writepid $piddir/$bn.pid --cd $work --config $c $script_security
+            if [ $? = 0 ]; then
+                successes=1
+            else
+                errors=1
+            fi
+        done
+        if [ $errors = 1 ]; then
+            failure; echo
+        else
+            success; echo
+        fi
+        if [ $successes = 1 ]; then
+            touch $lock
+        fi
+        ;;
+  stop)
+        echo -n $"Shutting down openvpn: "
+        echo 0 > /proc/sys/net/ipv4/ip_forward
+        for pidf in `/bin/ls $piddir/*.pid 2>/dev/null`; do
+          if [ -s $pidf ]; then
+            kill `cat $pidf` >/dev/null 2>&1
+          fi
+          rm -f $pidf
+        done
+        # Run shutdown script, if defined
+        if [ -f $work/openvpn-shutdown ]; then
+            $work/openvpn-shutdown
+        fi
+        success; echo
+        rm -f $lock
+        ;;
+  restart)
+        $0 stop
+        sleep 2
+        $0 start
+        ;;
+  reload)
+        if [ -f $lock ]; then
+            for pidf in `/bin/ls $piddir/*.pid 2>/dev/null`; do
+                if [ -s $pidf ]; then
+                    kill -HUP `cat $pidf` >/dev/null 2>&1
+                fi
+            done
+        else
+            echo "openvpn: service not started"
+            exit 1
+        fi
+        ;;
+  reopen)
+        if [ -f $lock ]; then
+            for pidf in `/bin/ls $piddir/*.pid 2>/dev/null`; do
+                if [ -s $pidf ]; then
+                    kill -USR1 `cat $pidf` >/dev/null 2>&1
+                fi
+            done
+        else
+            echo "openvpn: service not started"
+            exit 1
+        fi
+        ;;
+  condrestart)
+        if [ -f $lock ]; then
+            $0 stop
+            # avoid race
+            sleep 2
+            $0 start
+        fi
+        ;;
+  status)
+        if [ -f $lock ]; then
+            for pidf in `/bin/ls $piddir/*.pid 2>/dev/null`; do
+                if [ -s $pidf ]; then
+                    kill -USR2 `cat $pidf` >/dev/null 2>&1
+                fi
+            done
+            echo "Status written to /var/log/messages"
+        else
+            echo "openvpn: service not started"
+            exit 1
+        fi
+        ;;
+  *)
+        echo "Usage: openvpn {start|stop|restart|condrestart|reload|reopen|status}"
+        exit 1
+        ;;
+esac
+exit 0
